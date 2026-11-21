@@ -174,8 +174,8 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        status.text = "● " + Bus.current
-        reactor.active = Bus.current == "EMİR BEKLİYOR" || Bus.current == "UYANDI" || Bus.current == "DÜŞÜNÜYOR"
+        status.text = "● " + Bus.state
+        reactor.active = Bus.state == "EMİR BEKLİYOR" || Bus.state == "UYANDI" || Bus.state == "DÜŞÜNÜYOR"
         logv.text = Bus.text()
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
     }
