@@ -12,8 +12,9 @@ import java.util.Locale
 object Bus {
     private val main = Handler(Looper.getMainLooper())
     private val lines = ArrayDeque<String>()
-    @Volatile var state: String = "KAPALI"
+    @Volatile var current: String = "KAPALI"
     var onUpdate: (() -> Unit)? = null
+    var onMessage: ((Msg) -> Unit)? = null
 
     fun log(msg: String) {
         val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
@@ -25,7 +26,7 @@ object Bus {
     }
 
     fun setState(s: String) {
-        state = s
+        current = s
         main.post { onUpdate?.invoke() }
     }
 

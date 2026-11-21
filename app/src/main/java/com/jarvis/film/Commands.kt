@@ -82,6 +82,52 @@ object Commands {
             Pending.msg = null
         }
 
+        // Öğrenme: "X dediğimde Y yap"
+        val teach = Regex("^(?:ogren )?(.+?) (?:dedigimde|dersem|dedigim zaman) (.+?)(?: yap| calistir)?$").find(n)
+        if (teach != null) {
+            val phrase = teach.groupValues[1].trim()
+            val action = teach.groupValues[2].trim()
+            if (phrase.isNotEmpty() && action.isNotEmpty() && phrase != action) {
+                Learn.put(ctx, phrase, action)
+                return "Öğrendim efendim. $phrase dediğinizde $action yapacağım."
+            }
+        }
+        if (has(n, "neler ogrendin|ogrendiklerini listele")) return Learn.list(ctx)
+        if (has(n, "ogrendiklerini sil|hepsini unut")) {
+            Learn.clear(ctx)
+            return "Öğrendiklerimi sildim efendim."
+        }
+        val alias = Learn.find(ctx, n)
+        if (alias != null && alias != n && depth < 2) {
+            depth++
+            try {
+                return handle(ctx, alias, alias) ?: Brain.ask(ctx, alias)
+            } finally {
+                depth--
+            }
+        }
+
+        // Sürüş modu
+        if (has(n, "surus modu")) {
+            val on = !has(n, "kapat|bitir|kapa")
+            Prefs.setStr(ctx, "driving", if (on) "1" else "0")
+            return if (on) "Sürüş modu açıldı efendim. Gelen mesajları sesli okuyacağım." else "Sürüş modu kapandı efendim."
+        }
+
+        // Video düzenleme
+        if (has(n, "video")) {
+            if (has(n, "efekt|gecis|filtre")) {
+                return "Geçiş ve efekt için ayrı bir kütüphane gerekiyor, henüz eklemedim efendim. Kırpma, birleştirme ve müzik ekleme hazır."
+            }
+            if (has(n, "kirp|kes|kisalt")) {
+                val sec = Regex("(\\d+) saniye").find(n)?.groupValues?.get(1)?.toInt()
+                    ?: return "Kaç saniye kalsın efendim?"
+                return VideoTools.trim(ctx, sec)
+            }
+            if (has(n, "birlestir")) return VideoTools.merge(ctx, clipCount(n))
+            if (has(n, "muzik") && has(n, "ekle|koy")) return VideoTools.addMusic(ctx)
+        }
+
         // 1) Zamanlayıcı
         val tm = Regex("(\\d+) (saat|dakika|dk|saniye|sn)").find(n)
         if (tm != null && has(n, "sonra|zamanlayici|sayac")) {
@@ -230,8 +276,12 @@ object Commands {
             else "Kamerayı açamadım efendim."
         }
         if (has(n, "fotograf cek|foto cek|resim cek|selfie|kamera ac|kamerayi ac")) {
-            return if (launch(ctx, Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))) "Kamera açıldı efendim. Deklanşör sizde.$warn"
-            else "Kamerayı açamadım efendim."
+            if (!launch(ctx, Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))) return "Kamerayı açamadım efendim."
+            if (has(n, "fotograf cek|foto cek|resim cek|selfie") && JarvisAccessService.instance != null) {
+                Thread { shutter() }.start()
+                return "Kamera açıldı, deklanşöre dokunmayı deniyorum efendim.$warn"
+            }
+            return "Kamera açıldı efendim. Deklanşör sizde.$warn"
         }
         if (has(n, "fotograf|foto|resim") && has(n, "\\bson\\b")) {
             return lastPhoto(ctx, warn)
@@ -272,6 +322,34 @@ object Commands {
             }
         }
         return null
+    }
+
+    private var depth = 0
+
+    private fun shutter() {
+        try {
+            Thread.sleep(2500)
+            val s = JarvisAccessService.instance ?: return
+            for (l in listOf("Deklanşör", "Fotoğraf çek", "Çekim", "Shutter", "Take photo", "Capture")) {
+                if (s.clickText(l)) {
+                    Bus.log("Deklanşöre dokunuldu")
+                    return
+                }
+            }
+            Bus.log("Deklanşör düğmesi bulunamadı")
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun clipCount(n: String): Int {
+        val m = Regex("\\b(\\d)\\b").find(n)
+        if (m != null) return m.groupValues[1].toInt().coerceIn(2, 5)
+        return when {
+            has(n, "\\buc\\b") -> 3
+            has(n, "\\bdort\\b") -> 4
+            has(n, "\\bbes\\b") -> 5
+            else -> 2
+        }
     }
 
     fun batteryPct(ctx: Context): Int {

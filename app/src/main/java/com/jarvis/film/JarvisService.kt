@@ -67,6 +67,7 @@ class JarvisService : Service() {
     private var dead = false
     private var busyRetries = 0
     private var callMode = false
+    private var lastDmAnn = 0L
     private var ringing = false
     private val announced = HashSet<String>()
     private var warned20 = false
@@ -126,6 +127,7 @@ class JarvisService : Service() {
             Bus.log("Arama dinleme açılamadı: ${e.message}")
         }
         main.postDelayed(ticker, 60000L)
+        Bus.onMessage = { m -> main.post { onNewMessage(m) } }
         Bus.setState("BAŞLATILIYOR")
         Bus.log("Jarvis servisi başladı")
 
@@ -159,6 +161,7 @@ class JarvisService : Service() {
         Bus.setState("KAPALI")
         try { unregisterReceiver(batt) } catch (e: Exception) {}
         main.removeCallbacks(ticker)
+        Bus.onMessage = null
         try {
             val tmgr = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
             tmgr.listen(phoneListener, PhoneStateListener.LISTEN_NONE)
@@ -276,20 +279,8 @@ class JarvisService : Service() {
         return null
     }
 
-    private fun ensureModel(): File? {
-        val root = File(filesDir, "vosk")
-        findModelDir(root)?.let { return it }
-        Bus.log("Ses modeli indiriliyor (~40 MB), lütfen bekleyin...")
-        val zip = File(cacheDir, "model.zip")
-        val c = URL(MODEL_URL).openConnection() as HttpURLConnection
-        c.connectTimeout = 15000
-        c.readTimeout = 30000
-        c.inputStream.use { ins -> FileOutputStream(zip).use { out -> ins.copyTo(out) } }
-        c.disconnect()
-        val tmp = File(filesDir, "vosk_tmp")
-        tmp.deleteRecursively()
-        tmp.mkdirs()
-        ZipInputStream(BufferedInputStream(FileInputStream(zip))).use { z ->
+    private fun unzip(ins: java.io.InputStream, tmp: File) {
+        ZipInputStream(BufferedInputStream(ins)).use { z ->
             var e = z.nextEntry
             while (e != null) {
                 val out = File(tmp, e.name)
@@ -304,7 +295,32 @@ class JarvisService : Service() {
                 e = z.nextEntry
             }
         }
-        zip.delete()
+    }
+
+    private fun ensureModel(): File? {
+        val root = File(filesDir, "vosk")
+        findModelDir(root)?.let { return it }
+        val tmp = File(filesDir, "vosk_tmp")
+        tmp.deleteRecursively()
+        tmp.mkdirs()
+        var fromAssets = false
+        try {
+            assets.open("model.zip").use { ins -> unzip(ins, tmp) }
+            fromAssets = true
+            Bus.log("Ses modeli uygulamanın içinden açıldı")
+        } catch (e: java.io.FileNotFoundException) {
+            Bus.log("Model uygulamada yok, internetten indiriliyor (~40 MB)...")
+        }
+        if (!fromAssets) {
+            val zip = File(cacheDir, "model.zip")
+            val c = URL(MODEL_URL).openConnection() as HttpURLConnection
+            c.connectTimeout = 15000
+            c.readTimeout = 30000
+            c.inputStream.use { ins -> FileOutputStream(zip).use { out -> ins.copyTo(out) } }
+            c.disconnect()
+            FileInputStream(zip).use { unzip(it, tmp) }
+            zip.delete()
+        }
         root.deleteRecursively()
         if (!tmp.renameTo(root)) throw IllegalStateException("model taşınamadı")
         return findModelDir(root)
@@ -560,8 +576,18 @@ class JarvisService : Service() {
         }
     }
 
+    private fun onNewMessage(m: Msg) {
+        if (Prefs.str(this, "driving") == "1") {
+            announce("${m.from} yazdı: ${m.text.take(100)}", false)
+        }
+    }
+
     private fun tick() {
         val now = System.currentTimeMillis()
+        val pend = JarvisNotifService.snapshot().size
+        if (pend >= 3 && state == "WAKE" && now - lastDmAnn > 3600000L) {
+            if (announce("$pend mesaj birikti efendim. İsterseniz özetleyeyim.", false)) lastDmAnn = now
+        }
         if (state == "WAKE") {
             for (ev in CalendarHelper.events(this, now, now + 16 * 60000L)) {
                 val mins = (ev.first - now) / 60000L

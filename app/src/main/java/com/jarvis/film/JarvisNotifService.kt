@@ -86,11 +86,13 @@ class JarvisNotifService : NotificationListenerService() {
                 }
             }
         }
+        val m = Msg(pkg, from, text, pi, ri, System.currentTimeMillis())
         synchronized(inbox) {
             val last = inbox.lastOrNull()
             if (last != null && last.from == from && last.text == text) return
-            inbox.add(Msg(pkg, from, text, pi, ri, System.currentTimeMillis()))
+            inbox.add(m)
             while (inbox.size > 50) inbox.removeAt(0)
         }
+        Bus.onMessage?.invoke(m)
     }
 }
