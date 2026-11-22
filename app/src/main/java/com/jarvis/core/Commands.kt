@@ -1,4 +1,4 @@
-package com.jarvis.film
+package com.jarvis.core
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
@@ -23,6 +23,7 @@ import java.util.Locale
 object Pending {
     @Volatile var msg: Msg? = null
     @Volatile var draft: String? = null
+    @Volatile var followup: String = ""
 }
 
 object Block {
@@ -82,6 +83,12 @@ object Commands {
             Pending.msg = null
         }
 
+        if (Pending.followup == "alarm") {
+            Pending.followup = ""
+            val t0 = parseTime(n)
+            if (t0 != null) return setAlarm(ctx, t0, warn)
+        }
+
         // Öğrenme: "X dediğimde Y yap"
         val teach = Regex("^(?:ogren )?(.+?) (?:dedigimde|dersem|dedigim zaman) (.+?)(?: yap| calistir)?$").find(n)
         if (teach != null) {
@@ -114,20 +121,6 @@ object Commands {
             return if (on) "Sürüş modu açıldı efendim. Gelen mesajları sesli okuyacağım." else "Sürüş modu kapandı efendim."
         }
 
-        // Video düzenleme
-        if (has(n, "video")) {
-            if (has(n, "efekt|gecis|filtre")) {
-                return "Geçiş ve efekt için ayrı bir kütüphane gerekiyor, henüz eklemedim efendim. Kırpma, birleştirme ve müzik ekleme hazır."
-            }
-            if (has(n, "kirp|kes|kisalt")) {
-                val sec = Regex("(\\d+) saniye").find(n)?.groupValues?.get(1)?.toInt()
-                    ?: return "Kaç saniye kalsın efendim?"
-                return VideoTools.trim(ctx, sec)
-            }
-            if (has(n, "birlestir")) return VideoTools.merge(ctx, clipCount(n))
-            if (has(n, "muzik") && has(n, "ekle|koy")) return VideoTools.addMusic(ctx)
-        }
-
         // 1) Zamanlayıcı
         val tm = Regex("(\\d+) (saat|dakika|dk|saniye|sn)").find(n)
         if (tm != null && has(n, "sonra|zamanlayici|sayac")) {
@@ -140,19 +133,19 @@ object Commands {
             val i = Intent(AlarmClock.ACTION_SET_TIMER)
                 .putExtra(AlarmClock.EXTRA_LENGTH, secs)
                 .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            return if (launch(ctx, i)) "Zamanlayıcı kuruldu efendim.$warn" else "Zamanlayıcıyı kuramadım efendim."
+            if (!launch(ctx, i)) return "Zamanlayıcıyı kuramadım efendim."
+            Reminders.add(ctx, System.currentTimeMillis() + secs * 1000L, "Zamanlayıcı bitti efendim.")
+            return "Zamanlayıcı kuruldu efendim.$warn"
         }
 
         // 2) Alarm
         if (has(n, "\\balarm") && has(n, "kur|ayarla|koy|olustur|ekle")) {
-            val t = parseTime(n) ?: return "Saati anlayamadım efendim."
-            val i = Intent(AlarmClock.ACTION_SET_ALARM)
-                .putExtra(AlarmClock.EXTRA_HOUR, t.first)
-                .putExtra(AlarmClock.EXTRA_MINUTES, t.second)
-                .putExtra(AlarmClock.EXTRA_MESSAGE, "Jarvis")
-                .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-            val hhmm = String.format(Locale.US, "%02d:%02d", t.first, t.second)
-            return if (launch(ctx, i)) "Alarm $hhmm için kuruldu efendim.$warn" else "Alarmı kuramadım efendim."
+            val t = parseTime(n)
+            if (t == null) {
+                Pending.followup = "alarm"
+                return "Saat kaçta efendim?"
+            }
+            return setAlarm(ctx, t, warn)
         }
 
         // 3) Fener
@@ -325,6 +318,24 @@ object Commands {
     }
 
     private var depth = 0
+
+    private fun setAlarm(ctx: Context, t: Pair<Int, Int>, warn: String): String {
+        val i = Intent(AlarmClock.ACTION_SET_ALARM)
+            .putExtra(AlarmClock.EXTRA_HOUR, t.first)
+            .putExtra(AlarmClock.EXTRA_MINUTES, t.second)
+            .putExtra(AlarmClock.EXTRA_MESSAGE, "Jarvis")
+            .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+        if (!launch(ctx, i)) return "Alarmı kuramadım efendim."
+        val c = Calendar.getInstance()
+        c.set(Calendar.HOUR_OF_DAY, t.first)
+        c.set(Calendar.MINUTE, t.second)
+        c.set(Calendar.SECOND, 0)
+        c.set(Calendar.MILLISECOND, 0)
+        if (c.timeInMillis <= System.currentTimeMillis()) c.add(Calendar.DAY_OF_YEAR, 1)
+        Reminders.add(ctx, c.timeInMillis, "Alarm vakti efendim.")
+        val hhmm = String.format(Locale.US, "%02d:%02d", t.first, t.second)
+        return "Alarm $hhmm için kuruldu efendim.$warn"
+    }
 
     private fun shutter() {
         try {

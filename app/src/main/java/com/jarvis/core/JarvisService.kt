@@ -1,5 +1,6 @@
-package com.jarvis.film
+package com.jarvis.core
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,9 +10,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.PixelFormat
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -21,32 +25,29 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.StatFs
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.provider.ContactsContract
+import android.provider.Settings
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
-import android.Manifest
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.provider.ContactsContract
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
+import android.view.Gravity
+import android.view.WindowManager
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.SpeechService
-import java.io.BufferedInputStream
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.zip.ZipInputStream
 import android.speech.RecognitionListener as SpeechListener
 import org.vosk.android.RecognitionListener as VoskListener
 
@@ -60,16 +61,18 @@ class JarvisService : Service() {
     private var curRec: Recognizer? = null
     private var recog: SpeechRecognizer? = null
     private var wl: PowerManager.WakeLock? = null
+    private var bubble: CoreView? = null
     private var state = "INIT"
     private var pendingAfter: (() -> Unit)? = null
     private var lastUtt = ""
     private var started = false
     private var dead = false
+    private var bargeOn = false
     private var busyRetries = 0
     private var callMode = false
-    private var lastDmAnn = 0L
     private var ringing = false
     private val announced = HashSet<String>()
+    private val msgQueue = ArrayList<String>()
     private var warned20 = false
     private var warned10 = false
     private var warned5 = false
@@ -77,21 +80,27 @@ class JarvisService : Service() {
     private var lastStorage = 0L
 
     companion object {
-        private const val CH = "jarvis"
-        private const val MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip"
+        private const val CH = "jarvis_core"
     }
 
     override fun onBind(i: Intent?): IBinder? = null
 
+    // =====================================================================
+    // Yasam dongusu
+    // =====================================================================
     override fun onCreate() {
         super.onCreate()
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(NotificationChannel(CH, "Jarvis", NotificationManager.IMPORTANCE_LOW))
+        val ch = NotificationChannel(CH, "J.A.R.V.I.S.", NotificationManager.IMPORTANCE_LOW)
+        ch.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        nm.createNotificationChannel(ch)
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val n = Notification.Builder(this, CH)
-            .setContentTitle("Jarvis")
+            .setContentTitle("J.A.R.V.I.S.")
             .setContentText("Emrinizdeyim efendim")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setLargeIcon(CoreDraw.bitmap(this, 128))
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setContentIntent(pi)
             .setOngoing(true)
             .build()
@@ -126,10 +135,11 @@ class JarvisService : Service() {
         } catch (e: Exception) {
             Bus.log("Arama dinleme açılamadı: ${e.message}")
         }
-        main.postDelayed(ticker, 60000L)
+        main.postDelayed(ticker, 20000L)
         Bus.onMessage = { m -> main.post { onNewMessage(m) } }
         Bus.setState("BAŞLATILIYOR")
-        Bus.log("Jarvis servisi başladı")
+        Bus.switchMode("IDLE")
+        Bus.log("J.A.R.V.I.S. servisi başladı")
 
         tts = TextToSpeech(this) { st ->
             if (st == TextToSpeech.SUCCESS) {
@@ -152,13 +162,19 @@ class JarvisService : Service() {
 
     override fun onStartCommand(i: Intent?, flags: Int, startId: Int): Int {
         if (dead) return START_NOT_STICKY
-        if (i?.action == "voice_next") nextVoice()
+        when (i?.action) {
+            "voice_next" -> nextVoice()
+            "listen_now" -> {
+                if (state == "WAKE") onWake() else Bus.log("Şu an dinlemeye geçemem ($state)")
+            }
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         dead = true
         Bus.setState("KAPALI")
+        Bus.switchMode("IDLE")
         try { unregisterReceiver(batt) } catch (e: Exception) {}
         main.removeCallbacks(ticker)
         Bus.onMessage = null
@@ -167,7 +183,8 @@ class JarvisService : Service() {
             tmgr.listen(phoneListener, PhoneStateListener.LISTEN_NONE)
         } catch (e: Exception) {
         }
-        stopWake()
+        hideBubble()
+        closeMic()
         try { recog?.destroy() } catch (e: Exception) {}
         try { tts?.stop(); tts?.shutdown() } catch (e: Exception) {}
         try { model?.close() } catch (e: Exception) {}
@@ -176,7 +193,9 @@ class JarvisService : Service() {
         super.onDestroy()
     }
 
-    // ---------- Ses seçimi ----------
+    // =====================================================================
+    // Ses secimi, konusma, ses efekti, titresim
+    // =====================================================================
     private fun trVoices(): List<Voice> = try {
         tts?.voices?.filter { it.locale.language == "tr" }?.sortedBy { it.name } ?: emptyList()
     } catch (e: Exception) {
@@ -199,12 +218,13 @@ class JarvisService : Service() {
         Prefs.setVoiceIdx(this, idx)
         tts?.voice = v[idx]
         Bus.log("Ses: ${v[idx].name} (${idx + 1}/${v.size})")
-        speak("Bu ses nasıl efendim?", null)
+        speak("Bu ses nasıl efendim?", false, null)
     }
 
-    // ---------- Konuşma ----------
-    private fun speak(text: String, after: (() -> Unit)?) {
+    private fun speak(text: String, err: Boolean = false, after: (() -> Unit)?) {
         Bus.log("J: $text")
+        Bus.switchMode(if (err) "ERROR" else "SPEAK")
+        showBubble()
         pendingAfter = after
         val t = tts
         if (t == null) {
@@ -217,13 +237,18 @@ class JarvisService : Service() {
         lastUtt = id
         t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
         main.postDelayed({ onSpoken(id) }, 8000L + text.length * 90L)
+        if (text.length > 40) startBarge()
     }
 
     private fun onSpoken(id: String?) {
         if (id != lastUtt) return
-        val a = pendingAfter ?: return
+        if (bargeOn) {
+            bargeOn = false
+            closeMic()
+        }
+        val a = pendingAfter
         pendingAfter = null
-        a.invoke()
+        a?.invoke()
     }
 
     private fun beepTech() {
@@ -236,19 +261,66 @@ class JarvisService : Service() {
         }
     }
 
+    private fun buzz() {
+        try {
+            val v = getSystemService(VIBRATOR_SERVICE) as Vibrator
+            v.vibrate(VibrationEffect.createOneShot(45L, 90))
+        } catch (e: Exception) {
+        }
+    }
+
     private fun isNight(): Boolean = Calendar.getInstance().get(Calendar.HOUR_OF_DAY) < 7
 
-    // ---------- Açılış ve Vosk modeli ----------
+    // =====================================================================
+    // Cekirdek balonu (sadece uyanik ve konusurken)
+    // =====================================================================
+    private fun showBubble() {
+        if (bubble != null || !Settings.canDrawOverlays(this)) return
+        try {
+            val v = CoreView(this)
+            val s = (96 * resources.displayMetrics.density).toInt()
+            val lp = WindowManager.LayoutParams(
+                s, s,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+            lp.gravity = Gravity.TOP or Gravity.END
+            lp.x = 24
+            lp.y = 160
+            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(v, lp)
+            bubble = v
+        } catch (e: Exception) {
+            Bus.log("Balon açılamadı: ${e.message}")
+        }
+    }
+
+    private fun hideBubble() {
+        val v = bubble ?: return
+        bubble = null
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
+        } catch (e: Exception) {
+        }
+    }
+
+    // =====================================================================
+    // Acilis ve ses modeli (APK icinden kopyalanir, internet gerekmez)
+    // =====================================================================
     private fun boot() {
         if (started || dead) return
         started = true
+        Bus.setState("MODEL YÜKLENİYOR")
         bg.execute {
             var dir: File? = null
             while (dir == null && !dead) {
                 try {
                     dir = ensureModel()
                 } catch (e: Exception) {
-                    Bus.log("Model hatası: ${e.message}. 20 sn sonra tekrar denenecek (internet gerekli).")
+                    Bus.log("Model hatası: ${e.message}")
+                    Bus.setState("MODEL HATASI")
                     try { Thread.sleep(20000) } catch (ie: InterruptedException) { return@execute }
                 }
             }
@@ -257,6 +329,7 @@ class JarvisService : Service() {
                 model = Model(dir.absolutePath)
             } catch (e: Exception) {
                 Bus.log("Model yüklenemedi: ${e.message}")
+                Bus.setState("MODEL HATASI")
                 return@execute
             }
             main.post {
@@ -267,90 +340,82 @@ class JarvisService : Service() {
         }
     }
 
-    private fun findModelDir(root: File): File? {
-        if (File(root, "am").isDirectory) return root
-        val kids = root.listFiles() ?: return null
-        for (k in kids) {
-            if (k.isDirectory) {
-                val r = findModelDir(k)
-                if (r != null) return r
-            }
-        }
-        return null
-    }
-
-    private fun unzip(ins: java.io.InputStream, tmp: File) {
-        ZipInputStream(BufferedInputStream(ins)).use { z ->
-            var e = z.nextEntry
-            while (e != null) {
-                val out = File(tmp, e.name)
-                if (!out.canonicalPath.startsWith(tmp.canonicalPath)) throw SecurityException("zip yolu")
-                if (e.isDirectory) {
-                    out.mkdirs()
-                } else {
-                    out.parentFile?.mkdirs()
-                    FileOutputStream(out).use { z.copyTo(it) }
-                }
-                z.closeEntry()
-                e = z.nextEntry
-            }
-        }
-    }
-
-    private fun ensureModel(): File? {
-        val root = File(filesDir, "vosk")
-        findModelDir(root)?.let { return it }
-        val tmp = File(filesDir, "vosk_tmp")
+    private fun ensureModel(): File {
+        val dest = File(filesDir, "model")
+        if (File(dest, "ready.txt").exists() && File(dest, "am").isDirectory) return dest
+        val top = assets.list("vosk-model")
+        if (top == null || top.isEmpty()) throw IllegalStateException("APK içinde ses modeli yok (vosk-model klasörü boş)")
+        Bus.log("Ses modeli telefona kopyalanıyor...")
+        val tmp = File(filesDir, "model_tmp")
         tmp.deleteRecursively()
-        tmp.mkdirs()
-        var fromAssets = false
-        try {
-            assets.open("model.zip").use { ins -> unzip(ins, tmp) }
-            fromAssets = true
-            Bus.log("Ses modeli uygulamanın içinden açıldı")
-        } catch (e: java.io.FileNotFoundException) {
-            Bus.log("Model uygulamada yok, internetten indiriliyor (~40 MB)...")
+        val n = copyAssets("vosk-model", tmp)
+        if (!File(tmp, "am").isDirectory) {
+            throw IllegalStateException("model yapısı beklenmedik (içerik: " + (tmp.list()?.joinToString(",") ?: "boş") + ")")
         }
-        if (!fromAssets) {
-            val zip = File(cacheDir, "model.zip")
-            val c = URL(MODEL_URL).openConnection() as HttpURLConnection
-            c.connectTimeout = 15000
-            c.readTimeout = 30000
-            c.inputStream.use { ins -> FileOutputStream(zip).use { out -> ins.copyTo(out) } }
-            c.disconnect()
-            FileInputStream(zip).use { unzip(it, tmp) }
-            zip.delete()
-        }
-        root.deleteRecursively()
-        if (!tmp.renameTo(root)) throw IllegalStateException("model taşınamadı")
-        return findModelDir(root)
+        File(tmp, "ready.txt").writeText("ok")
+        dest.deleteRecursively()
+        if (!tmp.renameTo(dest)) throw IllegalStateException("model taşınamadı")
+        Bus.log("Ses modeli kopyalandı ($n dosya)")
+        return dest
     }
 
-    // ---------- Uyandırma kelimesi dinleme ----------
-    private fun startWake() {
-        if (dead) return
-        val m = model ?: return
-        stopWake()
-        try {
+    private fun copyAssets(path: String, out: File): Int {
+        val names = assets.list(path) ?: return 0
+        if (names.isEmpty()) {
+            out.parentFile?.mkdirs()
+            assets.open(path).use { ins -> FileOutputStream(out).use { o -> ins.copyTo(o) } }
+            return 1
+        }
+        out.mkdirs()
+        var n = 0
+        for (nm in names) n += copyAssets("$path/$nm", File(out, nm))
+        return n
+    }
+
+    // =====================================================================
+    // Mikrofon: uyandirma kelimesi dinleme (Vosk) ve araya girme
+    // =====================================================================
+    private fun openMic(): Boolean {
+        val m = model ?: return false
+        closeMic()
+        return try {
             val rec = Recognizer(m, 16000f)
             val ss = SpeechService(rec, 16000f)
             curRec = rec
             speech = ss
             ss.startListening(wakeListener)
-            state = "WAKE"
-            Bus.setState("DİNLİYOR")
+            true
         } catch (e: Exception) {
             Bus.log("Mikrofon/Vosk hatası: ${e.message}")
-            main.postDelayed({ if (!dead && state != "CMD") startWake() }, 3000)
+            false
         }
     }
 
-    private fun stopWake() {
+    private fun closeMic() {
         try { speech?.stop() } catch (e: Exception) {}
         try { speech?.shutdown() } catch (e: Exception) {}
         speech = null
         try { curRec?.close() } catch (e: Exception) {}
         curRec = null
+    }
+
+    private fun startWake() {
+        if (dead) return
+        bargeOn = false
+        hideBubble()
+        Bus.switchMode("IDLE")
+        if (openMic()) {
+            state = "WAKE"
+            Bus.setState("DİNLİYOR")
+            main.postDelayed({ flushQueue() }, 700)
+        } else {
+            main.postDelayed({ if (!dead && state != "CMD" && state != "CALL") startWake() }, 3000)
+        }
+    }
+
+    private fun startBarge() {
+        if (bargeOn || model == null || dead || ringing || callMode || state == "WAKE") return
+        if (openMic()) bargeOn = true
     }
 
     private val wakeListener = object : VoskListener {
@@ -365,32 +430,53 @@ class JarvisService : Service() {
     }
 
     private fun inspect(h: String?, field: String) {
-        if (h == null || state != "WAKE") return
+        if (h == null || (state != "WAKE" && !bargeOn)) return
         val t = try { JSONObject(h).optString(field) } catch (e: Exception) { "" }
         if (t.isBlank()) return
+        if (field == "text") Bus.log("Duydum: $t")
         if (Wake.matches(t)) {
             Bus.log("Uyandırma: \"$t\"")
-            onWake()
+            if (bargeOn) bargeIn() else onWake()
         }
     }
 
     private fun onWake() {
         if (state != "WAKE") return
         state = "BUSY"
-        stopWake()
-        Bus.setState("UYANDI")
-        beepTech()
-        speak("Emrinizdeyim efendim.") { listenCommand() }
+        closeMic()
+        wakeGreeting()
     }
 
-    // ---------- Komut dinleme ----------
+    private fun bargeIn() {
+        bargeOn = false
+        lastUtt = ""
+        pendingAfter = null
+        closeMic()
+        try { tts?.stop() } catch (e: Exception) {}
+        state = "BUSY"
+        wakeGreeting()
+    }
+
+    private fun wakeGreeting() {
+        Bus.setState("UYANDI")
+        Bus.switchMode("WAKE")
+        showBubble()
+        buzz()
+        beepTech()
+        speak("Buyrun efendim.") { listenCommand() }
+    }
+
+    // =====================================================================
+    // Komut dinleme (Google ses tanima) ve isleme
+    // =====================================================================
     private fun listenCommand() {
         if (dead) return
         state = "CMD"
         Bus.setState("EMİR BEKLİYOR")
+        Bus.switchMode("WAKE")
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             Bus.log("Konuşma tanıma servisi yok (Google uygulaması gerekli)")
-            speak("Ses tanıma servisi bulunamadı efendim.") { endConversation() }
+            speak("Ses tanıma servisi bulunamadı efendim.", true) { endConversation() }
             return
         }
         try { recog?.destroy() } catch (e: Exception) {}
@@ -426,7 +512,7 @@ class JarvisService : Service() {
     private fun onCmdError(code: Int) {
         if (state != "CMD") return
         when (code) {
-            SpeechRecognizer.ERROR_NO_MATCH -> speak("Anlayamadım efendim.") { listenCommand() }
+            SpeechRecognizer.ERROR_NO_MATCH -> speak("Anlayamadım efendim.", true) { listenCommand() }
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> endConversation()
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
                 if (busyRetries++ < 3) {
@@ -438,7 +524,7 @@ class JarvisService : Service() {
             }
             else -> {
                 Bus.log("Tanıma hatası: $code")
-                speak("Ses tanıma hatası efendim.") { endConversation() }
+                speak("Ses tanıma hatası efendim.", true) { endConversation() }
             }
         }
     }
@@ -447,30 +533,35 @@ class JarvisService : Service() {
         if (state != "CMD") return
         busyRetries = 0
         if (t.isBlank()) {
-            speak("Anlayamadım efendim.") { listenCommand() }
+            speak("Anlayamadım efendim.", true) { listenCommand() }
             return
         }
         Bus.log("S: $t")
+        Bus.showAction(t)
         val n = Commands.norm(t)
         if (callMode) {
             callMode = false
             handleCallAnswer(n)
             return
         }
-        if (n == "sus" || n.startsWith("sus ") || n.contains("sus jarvis")) {
+        if (n.contains("paydos")) {
             endConversation()
             return
         }
         state = "BUSY"
         Bus.setState("DÜŞÜNÜYOR")
+        Bus.switchMode("THINK")
         bg.execute {
+            var failed = false
             val reply = try {
                 Commands.handle(this, t, n) ?: Brain.ask(this, t)
             } catch (e: Exception) {
                 Bus.log("Hata: ${e.message}")
+                failed = true
                 "Bir aksilik çıktı efendim."
             }
-            main.post { if (!dead) speak(reply) { listenCommand() } }
+            val bad = failed || reply.contains("Bağlantı kurulamadı") || reply.contains("reddedildi")
+            main.post { if (!dead) speak(reply, bad) { listenCommand() } }
         }
     }
 
@@ -480,10 +571,37 @@ class JarvisService : Service() {
         try { recog?.destroy() } catch (e: Exception) {}
         recog = null
         Bus.log("Sohbet bitti")
+        Bus.showAction("")
         main.postDelayed({ startWake() }, 300)
     }
 
-    // ---------- Telefon aramaları ----------
+    // =====================================================================
+    // Duyurular: mesaj okuma, uyari, hatirlatma
+    // =====================================================================
+    private fun announce(text: String, urgent: Boolean): Boolean {
+        if (state != "WAKE" || dead) return false
+        if (isNight() && !urgent) return false
+        state = "BUSY"
+        closeMic()
+        speak(text, urgent) { startWake() }
+        return true
+    }
+
+    private fun flushQueue() {
+        if (state != "WAKE" || msgQueue.isEmpty()) return
+        val t = msgQueue.removeAt(0)
+        if (!announce(t, false)) msgQueue.add(0, t)
+    }
+
+    private fun onNewMessage(m: Msg) {
+        if (isNight()) return
+        msgQueue.add("${m.from} yazdı: ${m.text.take(120)}")
+        if (state == "WAKE") flushQueue()
+    }
+
+    // =====================================================================
+    // Telefon aramalari
+    // =====================================================================
     private val phoneListener = object : PhoneStateListener() {
         override fun onCallStateChanged(st: Int, number: String?) {
             main.post { onCall(st, number) }
@@ -496,7 +614,7 @@ class JarvisService : Service() {
                 if (state != "WAKE") return
                 state = "BUSY"
                 ringing = true
-                stopWake()
+                closeMic()
                 val who = nameFor(number)
                 speak("$who arıyor efendim. Açayım mı?") {
                     if (ringing) {
@@ -508,9 +626,10 @@ class JarvisService : Service() {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 ringing = false
                 callMode = false
-                if (state == "WAKE") stopWake()
+                if (state == "WAKE") closeMic()
                 try { recog?.destroy() } catch (e: Exception) {}
                 recog = null
+                hideBubble()
                 state = "CALL"
                 Bus.setState("ARAMADA")
             }
@@ -551,6 +670,7 @@ class JarvisService : Service() {
                 Bus.setState("ARAMADA")
                 try { recog?.destroy() } catch (e: Exception) {}
                 recog = null
+                hideBubble()
                 tc.acceptRingingCall()
                 Bus.log("Arama açıldı")
                 return
@@ -567,26 +687,22 @@ class JarvisService : Service() {
         endConversation()
     }
 
-    // ---------- Takvim hatırlatması, sabah ve akşam özeti ----------
+    // =====================================================================
+    // Zamanlayici: hatirlatmalar, takvim, sabah ve aksam ozeti
+    // =====================================================================
     private val ticker = object : Runnable {
         override fun run() {
             if (dead) return
             try { tick() } catch (e: Exception) { Bus.log("Zamanlayıcı hatası: ${e.message}") }
-            main.postDelayed(this, 60000L)
-        }
-    }
-
-    private fun onNewMessage(m: Msg) {
-        if (Prefs.str(this, "driving") == "1") {
-            announce("${m.from} yazdı: ${m.text.take(100)}", false)
+            main.postDelayed(this, 20000L)
         }
     }
 
     private fun tick() {
         val now = System.currentTimeMillis()
-        val pend = JarvisNotifService.snapshot().size
-        if (pend >= 3 && state == "WAKE" && now - lastDmAnn > 3600000L) {
-            if (announce("$pend mesaj birikti efendim. İsterseniz özetleyeyim.", false)) lastDmAnn = now
+        if (state == "WAKE") {
+            val due = Reminders.due(this, now)
+            if (due.isNotEmpty()) announce(due.joinToString(" "), true)
         }
         if (state == "WAKE") {
             for (ev in CalendarHelper.events(this, now, now + 16 * 60000L)) {
@@ -617,16 +733,9 @@ class JarvisService : Service() {
         }
     }
 
-    // ---------- Telefon durumu uyarıları ----------
-    private fun announce(text: String, urgent: Boolean): Boolean {
-        if (state != "WAKE" || dead) return false
-        if (isNight() && !urgent) return false
-        state = "BUSY"
-        stopWake()
-        speak(text) { startWake() }
-        return true
-    }
-
+    // =====================================================================
+    // Telefon durumu: pil, isinma, depolama
+    // =====================================================================
     private val batt = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, i: Intent?) {
             if (i == null) return
@@ -636,6 +745,7 @@ class JarvisService : Service() {
             val pct = level * 100 / scale
             val plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
             val temp = i.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10
+            Bus.lowBattery = !plugged && pct < 20
             if (plugged || pct > 25) {
                 warned20 = false; warned10 = false; warned5 = false
             }

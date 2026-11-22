@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "jarvis-film"
+rootProject.name = "jarvis-core"
 include(":app")

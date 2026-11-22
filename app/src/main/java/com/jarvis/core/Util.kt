@@ -1,4 +1,4 @@
-package com.jarvis.film
+package com.jarvis.core
 
 import android.content.Context
 import android.os.Handler
@@ -13,6 +13,9 @@ object Bus {
     private val main = Handler(Looper.getMainLooper())
     private val lines = ArrayDeque<String>()
     @Volatile var current: String = "KAPALI"
+    @Volatile var mode: String = "IDLE"
+    @Volatile var action: String = ""
+    @Volatile var lowBattery: Boolean = false
     var onUpdate: (() -> Unit)? = null
     var onMessage: ((Msg) -> Unit)? = null
 
@@ -20,13 +23,27 @@ object Bus {
         val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         synchronized(lines) {
             lines.addLast("$t  $msg")
-            while (lines.size > 80) lines.removeFirst()
+            while (lines.size > 100) lines.removeFirst()
         }
-        main.post { onUpdate?.invoke() }
+        notifyUi()
     }
 
     fun setState(s: String) {
         current = s
+        notifyUi()
+    }
+
+    fun switchMode(m: String) {
+        mode = m
+        notifyUi()
+    }
+
+    fun showAction(a: String) {
+        action = a
+        notifyUi()
+    }
+
+    private fun notifyUi() {
         main.post { onUpdate?.invoke() }
     }
 
@@ -73,19 +90,22 @@ object History {
 object Wake {
     private val extra = setOf(
         "carvis", "carviz", "jarviz", "carvi", "jarvi", "arvis",
-        "harvis", "garvis", "charvis", "cervis"
+        "harvis", "garvis", "charvis", "cervis", "jarfis", "carfis"
     )
-    private val others = setOf("cumali", "cavus", "karen")
 
+    /** Hassas ayar: kolay uyansin, ara sira yanlis uyanabilir. */
     fun matches(text: String): Boolean {
         val n = Commands.norm(text)
         val joined = n.replace(" ", "")
         if (joined.contains("jarvis") || joined.contains("carvis") || joined.contains("jarviz")) return true
         for (t in n.split(" ")) {
             if (t.length < 4) continue
-            if (t == "jarvis" || t in extra || t in others) return true
-            if (t.length in 5..7 && lev(t, "jarvis") <= 1) return true
-            if (t.length in 5..7 && lev(t, "cumali") <= 1) return true
+            if (t == "jarvis" || t in extra) return true
+            if (t.length in 4..8) {
+                val d = lev(t, "jarvis")
+                if (d <= 1) return true
+                if (d <= 2 && (t.contains("rv") || t.contains("rw") || t.contains("rf") || t.contains("rb"))) return true
+            }
         }
         return false
     }

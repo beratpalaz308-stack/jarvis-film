@@ -15,11 +15,22 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Ses modelini indir
+      - name: Ses modelini indir ve dogrula
         run: |
           mkdir -p app/src/main/assets
-          curl -L --fail --retry 5 --retry-delay 5 -o app/src/main/assets/model.zip https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip
-          ls -lh app/src/main/assets/model.zip
+          curl -L --fail --retry 5 --retry-delay 5 -o /tmp/model.zip https://huggingface.co/rhasspy/vosk-models/resolve/main/tr/vosk-model-small-tr-0.3.zip || true
+          if ! (unzip -tq /tmp/model.zip >/dev/null 2>&1 && unzip -l /tmp/model.zip | grep -q "final.mdl"); then
+            echo "HuggingFace olmadi, alphacephei deneniyor"
+            curl -L --fail --retry 5 --retry-delay 5 -o /tmp/model.zip https://alphacephei.com/vosk/models/vosk-model-small-tr-0.3.zip
+          fi
+          unzip -tq /tmp/model.zip
+          rm -rf /tmp/m && mkdir /tmp/m && unzip -q /tmp/model.zip -d /tmp/m
+          MD=$(find /tmp/m -type d -name am | head -1 | xargs dirname)
+          echo "Model klasoru: $MD"
+          test -f "$MD/am/final.mdl"
+          cp -r "$MD" app/src/main/assets/vosk-model
+          ls app/src/main/assets/vosk-model
+          du -sh app/src/main/assets/vosk-model
       - name: Build
         run: gradle assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4

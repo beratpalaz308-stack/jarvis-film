@@ -1,4 +1,4 @@
-package com.jarvis.film
+package com.jarvis.core
 
 import android.app.Notification
 import android.app.PendingIntent

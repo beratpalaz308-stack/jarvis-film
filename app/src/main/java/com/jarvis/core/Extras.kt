@@ -1,4 +1,4 @@
-package com.jarvis.film
+package com.jarvis.core
 
 import android.Manifest
 import android.content.ContentUris
@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.provider.CalendarContract
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -81,6 +82,12 @@ object Weather {
         else -> "değişken"
     }
 
+    fun brief(ctx: Context): String? {
+        val s = summary(ctx) ?: return null
+        val m = Regex("Hava şu an (-?\\d+) derece ve ([^.]+)\\.").find(s) ?: return null
+        return m.groupValues[1] + "°C " + m.groupValues[2]
+    }
+
     fun summary(ctx: Context): String? {
         var lat: Double? = null
         var lon: Double? = null
@@ -148,5 +155,39 @@ object Summary {
         }
         sb.append("Pil yüzde ${Commands.batteryPct(ctx)}.")
         return sb.toString()
+    }
+}
+
+object Reminders {
+    private fun load(ctx: Context): JSONArray = try {
+        JSONArray(Prefs.str(ctx, "reminders"))
+    } catch (e: Exception) {
+        JSONArray()
+    }
+
+    @Synchronized
+    fun add(ctx: Context, at: Long, text: String) {
+        val a = load(ctx)
+        a.put(JSONObject().put("t", at).put("s", text))
+        Prefs.setStr(ctx, "reminders", a.toString())
+    }
+
+    /** Vakti gelenleri dondurur ve listeden siler. 30 dakikadan eski olanlar atilir. */
+    @Synchronized
+    fun due(ctx: Context, now: Long): List<String> {
+        val a = load(ctx)
+        val keep = JSONArray()
+        val out = ArrayList<String>()
+        for (i in 0 until a.length()) {
+            val o = a.getJSONObject(i)
+            val t = o.getLong("t")
+            if (now >= t) {
+                if (now - t < 30 * 60000L) out.add(o.getString("s"))
+            } else {
+                keep.put(o)
+            }
+        }
+        Prefs.setStr(ctx, "reminders", keep.toString())
+        return out
     }
 }
