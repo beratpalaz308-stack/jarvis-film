@@ -342,14 +342,14 @@ class JarvisService : Service() {
 
     private fun ensureModel(): File {
         val dest = File(filesDir, "model")
-        if (File(dest, "ready.txt").exists() && File(dest, "am").isDirectory) return dest
+        if (File(dest, "ready.txt").exists() && (File(dest, "am").isDirectory || File(dest, "final.mdl").exists())) return dest
         val top = assets.list("vosk-model")
         if (top == null || top.isEmpty()) throw IllegalStateException("APK içinde ses modeli yok (vosk-model klasörü boş)")
         Bus.log("Ses modeli telefona kopyalanıyor...")
         val tmp = File(filesDir, "model_tmp")
         tmp.deleteRecursively()
         val n = copyAssets("vosk-model", tmp)
-        if (!File(tmp, "am").isDirectory) {
+        if (!File(tmp, "am").isDirectory && !File(tmp, "final.mdl").exists()) {
             throw IllegalStateException("model yapısı beklenmedik (içerik: " + (tmp.list()?.joinToString(",") ?: "boş") + ")")
         }
         File(tmp, "ready.txt").writeText("ok")

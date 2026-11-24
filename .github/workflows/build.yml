@@ -25,9 +25,12 @@ jobs:
           fi
           unzip -tq /tmp/model.zip
           rm -rf /tmp/m && mkdir /tmp/m && unzip -q /tmp/model.zip -d /tmp/m
-          MD=$(find /tmp/m -type d -name am | head -1 | xargs dirname)
+          unzip -l /tmp/model.zip | head -25
+          FM=$(find /tmp/m -name final.mdl | head -1)
+          echo "final.mdl yolu: $FM"
+          test -n "$FM"
+          if [ "$(basename "$(dirname "$FM")")" = "am" ]; then MD=$(dirname "$(dirname "$FM")"); else MD=$(dirname "$FM"); fi
           echo "Model klasoru: $MD"
-          test -f "$MD/am/final.mdl"
           cp -r "$MD" app/src/main/assets/vosk-model
           ls app/src/main/assets/vosk-model
           du -sh app/src/main/assets/vosk-model
