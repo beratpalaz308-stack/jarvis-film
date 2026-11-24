@@ -69,6 +69,10 @@ class JarvisService : Service() {
     private var dead = false
     private var bargeOn = false
     private var busyRetries = 0
+    private var gotReady = false
+    private var cmdVosk = false
+    private var cmdGen = 0
+    private var vfall = 0
     private var callMode = false
     private var ringing = false
     private val announced = HashSet<String>()
@@ -165,7 +169,18 @@ class JarvisService : Service() {
         when (i?.action) {
             "voice_next" -> nextVoice()
             "listen_now" -> {
-                if (state == "WAKE") onWake() else Bus.log("Şu an dinlemeye geçemem ($state)")
+                if (state == "WAKE") {
+                    onWake()
+                } else if (state == "CMD") {
+                    Bus.log("Dinleme yeniden başlatıldı")
+                    try { recog?.destroy() } catch (e: Exception) {}
+                    recog = null
+                    cmdVosk = false
+                    closeMic()
+                    listenCommand()
+                } else {
+                    Bus.log("Şu an dinlemeye geçemem ($state)")
+                }
             }
         }
         return START_STICKY
@@ -342,14 +357,14 @@ class JarvisService : Service() {
 
     private fun ensureModel(): File {
         val dest = File(filesDir, "model")
-        if (File(dest, "ready.txt").exists() && (File(dest, "am").isDirectory || File(dest, "final.mdl").exists())) return dest
+        if (File(dest, "ready.txt").exists() && File(dest, "am").isDirectory) return dest
         val top = assets.list("vosk-model")
         if (top == null || top.isEmpty()) throw IllegalStateException("APK içinde ses modeli yok (vosk-model klasörü boş)")
         Bus.log("Ses modeli telefona kopyalanıyor...")
         val tmp = File(filesDir, "model_tmp")
         tmp.deleteRecursively()
         val n = copyAssets("vosk-model", tmp)
-        if (!File(tmp, "am").isDirectory && !File(tmp, "final.mdl").exists()) {
+        if (!File(tmp, "am").isDirectory) {
             throw IllegalStateException("model yapısı beklenmedik (içerik: " + (tmp.list()?.joinToString(",") ?: "boş") + ")")
         }
         File(tmp, "ready.txt").writeText("ok")
@@ -375,7 +390,7 @@ class JarvisService : Service() {
     // =====================================================================
     // Mikrofon: uyandirma kelimesi dinleme (Vosk) ve araya girme
     // =====================================================================
-    private fun openMic(): Boolean {
+    private fun openMic(l: VoskListener = wakeListener): Boolean {
         val m = model ?: return false
         closeMic()
         return try {
@@ -383,7 +398,7 @@ class JarvisService : Service() {
             val ss = SpeechService(rec, 16000f)
             curRec = rec
             speech = ss
-            ss.startListening(wakeListener)
+            ss.startListening(l)
             true
         } catch (e: Exception) {
             Bus.log("Mikrofon/Vosk hatası: ${e.message}")
@@ -474,20 +489,27 @@ class JarvisService : Service() {
         state = "CMD"
         Bus.setState("EMİR BEKLİYOR")
         Bus.switchMode("WAKE")
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Bus.log("Konuşma tanıma servisi yok (Google uygulaması gerekli)")
-            speak("Ses tanıma servisi bulunamadı efendim.", true) { endConversation() }
+        cmdGen++
+        val gen = cmdGen
+        val googleOk = SpeechRecognizer.isRecognitionAvailable(this)
+        if (!googleOk || Prefs.str(this, "stt") == "vosk") {
+            if (!googleOk) Bus.log("Google ses tanıma yok, yerel tanıma kullanılacak")
+            listenWithVosk(gen)
             return
         }
+        gotReady = false
         try { recog?.destroy() } catch (e: Exception) {}
         val r = SpeechRecognizer.createSpeechRecognizer(this)
         recog = r
         r.setRecognitionListener(object : SpeechListener {
-            override fun onReadyForSpeech(p: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
+            override fun onReadyForSpeech(p: Bundle?) {
+                gotReady = true
+                Bus.log("Dinleme hazır (Google)")
+            }
+            override fun onBeginningOfSpeech() { Bus.log("Konuşma başladı") }
             override fun onRmsChanged(v: Float) {}
             override fun onBufferReceived(b: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+            override fun onEndOfSpeech() { Bus.log("Konuşma bitti") }
             override fun onError(code: Int) { main.post { onCmdError(code) } }
             override fun onResults(res: Bundle?) {
                 val t = res?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
@@ -504,13 +526,69 @@ class JarvisService : Service() {
         try {
             r.startListening(i)
         } catch (e: Exception) {
-            Bus.log("Dinleme başlatılamadı: ${e.message}")
-            endConversation()
+            Bus.log("Google dinleme başlatılamadı: ${e.message}")
+            listenWithVosk(gen)
+            return
         }
+        // Bekci: 6 sn icinde hazir olmazsa Google ses tanima calismiyor demektir
+        main.postDelayed({
+            if (!dead && state == "CMD" && cmdGen == gen && !gotReady) {
+                Bus.log("Google ses tanıma yanıt vermedi, yerel tanımaya geçiliyor")
+                Prefs.setStr(this, "stt", "vosk")
+                try { recog?.destroy() } catch (e: Exception) {}
+                recog = null
+                listenWithVosk(gen)
+            }
+        }, 6000L)
+        main.postDelayed({
+            if (!dead && state == "CMD" && cmdGen == gen && !cmdVosk) {
+                Bus.log("Dinleme zaman aşımı")
+                endConversation()
+            }
+        }, 25000L)
+    }
+
+    /** Cihazdaki Google tanima calismazsa komutu Vosk ile (cevrimdisi) dinler. */
+    private fun listenWithVosk(gen: Int) {
+        try { recog?.destroy() } catch (e: Exception) {}
+        recog = null
+        cmdVosk = true
+        if (!openMic(cmdListener)) {
+            cmdVosk = false
+            speak("Mikrofon açılamadı efendim.", true) { endConversation() }
+            return
+        }
+        Bus.log("Yerel tanıma dinliyor, komutu söyleyin")
+        main.postDelayed({
+            if (!dead && state == "CMD" && cmdVosk && cmdGen == gen) {
+                cmdVosk = false
+                closeMic()
+                Bus.log("Komut duyulmadı")
+                endConversation()
+            }
+        }, 10000L)
+    }
+
+    private val cmdListener = object : VoskListener {
+        override fun onPartialResult(h: String?) {}
+        override fun onResult(h: String?) { main.post { cmdResult(h) } }
+        override fun onFinalResult(h: String?) { main.post { cmdResult(h) } }
+        override fun onError(e: Exception?) { Bus.log("Mikrofon hatası: ${e?.message}") }
+        override fun onTimeout() {}
+    }
+
+    private fun cmdResult(h: String?) {
+        if (!cmdVosk || state != "CMD" || h == null) return
+        val t = try { JSONObject(h).optString("text") } catch (e: Exception) { "" }
+        if (t.isBlank()) return
+        cmdVosk = false
+        closeMic()
+        onCmdText(t)
     }
 
     private fun onCmdError(code: Int) {
         if (state != "CMD") return
+        Bus.log("Google tanıma hata kodu: $code")
         when (code) {
             SpeechRecognizer.ERROR_NO_MATCH -> speak("Anlayamadım efendim.", true) { listenCommand() }
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> endConversation()
@@ -523,8 +601,14 @@ class JarvisService : Service() {
                 }
             }
             else -> {
-                Bus.log("Tanıma hatası: $code")
-                speak("Ses tanıma hatası efendim.", true) { endConversation() }
+                if (vfall++ < 2) {
+                    Bus.log("Google tanıma çalışmadı, yerel tanımaya geçiliyor")
+                    try { recog?.destroy() } catch (e: Exception) {}
+                    recog = null
+                    listenWithVosk(cmdGen)
+                } else {
+                    speak("Ses tanıma hatası efendim.", true) { endConversation() }
+                }
             }
         }
     }
@@ -532,6 +616,8 @@ class JarvisService : Service() {
     private fun onCmdText(t: String) {
         if (state != "CMD") return
         busyRetries = 0
+        vfall = 0
+        cmdVosk = false
         if (t.isBlank()) {
             speak("Anlayamadım efendim.", true) { listenCommand() }
             return
@@ -568,6 +654,9 @@ class JarvisService : Service() {
     private fun endConversation() {
         state = "BUSY"
         callMode = false
+        cmdVosk = false
+        cmdGen++
+        closeMic()
         try { recog?.destroy() } catch (e: Exception) {}
         recog = null
         Bus.log("Sohbet bitti")
