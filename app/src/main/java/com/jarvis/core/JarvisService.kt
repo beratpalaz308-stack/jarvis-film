@@ -73,6 +73,8 @@ class JarvisService : Service() {
     private var cmdVosk = false
     private var cmdGen = 0
     private var vfall = 0
+    private var teachCount = 0
+    private val taught = ArrayList<String>()
     private var callMode = false
     private var ringing = false
     private val announced = HashSet<String>()
@@ -102,7 +104,7 @@ class JarvisService : Service() {
         val n = Notification.Builder(this, CH)
             .setContentTitle("J.A.R.V.I.S.")
             .setContentText("Emrinizdeyim efendim")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setSmallIcon(R.drawable.ic_stat)
             .setLargeIcon(CoreDraw.bitmap(this, 128))
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setContentIntent(pi)
@@ -143,6 +145,7 @@ class JarvisService : Service() {
         Bus.onMessage = { m -> main.post { onNewMessage(m) } }
         Bus.setState("BAŞLATILIYOR")
         Bus.switchMode("IDLE")
+        Wake.aliases = Prefs.str(this, "wake_alias").split(",").map { it.trim() }.filter { it.length >= 3 }.toSet()
         Bus.log("J.A.R.V.I.S. servisi başladı")
 
         tts = TextToSpeech(this) { st ->
@@ -168,6 +171,9 @@ class JarvisService : Service() {
         if (dead) return START_NOT_STICKY
         when (i?.action) {
             "voice_next" -> nextVoice()
+            "teach_wake" -> {
+                if (state == "WAKE") startTeach() else Bus.log("Şu an öğretemem ($state)")
+            }
             "listen_now" -> {
                 if (state == "WAKE") {
                     onWake()
@@ -350,7 +356,7 @@ class JarvisService : Service() {
             main.post {
                 if (dead) return@post
                 Bus.log("Ses modeli hazır")
-                if (isNight()) startWake() else speak("Sistemler çevrimiçi efendim.") { startWake() }
+                if (isNight()) startWake() else speak("Sistemler çevrimiçi efendim. Pil yüzde ${Commands.batteryPct(this)}.") { startWake() }
             }
         }
     }
@@ -390,11 +396,20 @@ class JarvisService : Service() {
     // =====================================================================
     // Mikrofon: uyandirma kelimesi dinleme (Vosk) ve araya girme
     // =====================================================================
-    private fun openMic(l: VoskListener = wakeListener): Boolean {
+    private fun openMic(l: VoskListener = wakeListener, grammar: Boolean = true): Boolean {
         val m = model ?: return false
         closeMic()
         return try {
-            val rec = Recognizer(m, 16000f)
+            val rec = if (grammar) {
+                try {
+                    Recognizer(m, 16000f, wakeGrammar())
+                } catch (e: Exception) {
+                    Bus.log("Kelime listesi kapalı: ${e.message}")
+                    Recognizer(m, 16000f)
+                }
+            } else {
+                Recognizer(m, 16000f)
+            }
             val ss = SpeechService(rec, 16000f)
             curRec = rec
             speech = ss
@@ -448,10 +463,81 @@ class JarvisService : Service() {
         if (h == null || (state != "WAKE" && !bargeOn)) return
         val t = try { JSONObject(h).optString(field) } catch (e: Exception) { "" }
         if (t.isBlank()) return
-        if (field == "text") Bus.log("Duydum: $t")
+        if (field == "text" && Commands.norm(t) != "unk") Bus.log("Duydum: $t")
         if (Wake.matches(t)) {
             Bus.log("Uyandırma: \"$t\"")
             if (bargeOn) bargeIn() else onWake()
+        }
+    }
+
+    /** Uyandirma tanimasi sadece bu kelimelerle sinirlanir: cok daha az kacirir. */
+    private fun wakeGrammar(): String {
+        val words = LinkedHashSet<String>()
+        for (w in listOf("carvis", "jarvis", "carviz", "cevis", "ceviz", "james", "caiz", "cavis")) words.add(w)
+        for (a in Wake.aliases) {
+            for (w in a.split(" ")) if (w.length >= 3) words.add(w)
+        }
+        val arr = org.json.JSONArray()
+        for (w in words) arr.put(w)
+        arr.put("[unk]")
+        return arr.toString()
+    }
+
+    // ---------- UYANDIRMAYI OGRET ----------
+    private fun startTeach() {
+        if (state != "WAKE") return
+        state = "BUSY"
+        closeMic()
+        teachCount = 0
+        taught.clear()
+        speak("Jarvis diye beş kez seslenin efendim. Her seferinde bir saniye bekleyin.") { teachListen() }
+    }
+
+    private fun teachListen() {
+        if (!openMic(teachListener, false)) {
+            startWake()
+            return
+        }
+        state = "TEACH"
+        Bus.setState("ÖĞRENİYOR")
+        Bus.switchMode("WAKE")
+        main.postDelayed({ if (state == "TEACH") finishTeach() }, 30000L)
+    }
+
+    private val teachListener = object : VoskListener {
+        override fun onPartialResult(h: String?) {}
+        override fun onResult(h: String?) { main.post { teachResult(h) } }
+        override fun onFinalResult(h: String?) { main.post { teachResult(h) } }
+        override fun onError(e: Exception?) { Bus.log("Mikrofon hatası: ${e?.message}") }
+        override fun onTimeout() {}
+    }
+
+    private fun teachResult(h: String?) {
+        if (state != "TEACH" || h == null) return
+        val t = try { JSONObject(h).optString("text") } catch (e: Exception) { "" }
+        val n = Commands.norm(t)
+        if (n.isEmpty()) return
+        if (n.length < 3 || n.length > 14 || n.split(" ").size > 2) {
+            Bus.log("Atlandı: $t")
+            return
+        }
+        teachCount++
+        if (!taught.contains(n)) taught.add(n)
+        Bus.log("Öğrenilen ($teachCount/5): $n")
+        if (teachCount >= 5) finishTeach()
+    }
+
+    private fun finishTeach() {
+        if (state != "TEACH") return
+        state = "BUSY"
+        closeMic()
+        Prefs.setStr(this, "wake_alias", taught.joinToString(","))
+        Wake.aliases = taught.toSet()
+        Bus.log("Uyandırma kelimeleri: " + taught.joinToString(", "))
+        if (taught.isEmpty()) {
+            speak("Hiçbir şey duyamadım efendim. Sessiz bir yerde tekrar deneyin.", true) { startWake() }
+        } else {
+            speak("Tamam efendim, ${taught.size} varyasyon öğrendim.") { startWake() }
         }
     }
 
@@ -553,7 +639,7 @@ class JarvisService : Service() {
         try { recog?.destroy() } catch (e: Exception) {}
         recog = null
         cmdVosk = true
-        if (!openMic(cmdListener)) {
+        if (!openMic(cmdListener, false)) {
             cmdVosk = false
             speak("Mikrofon açılamadı efendim.", true) { endConversation() }
             return

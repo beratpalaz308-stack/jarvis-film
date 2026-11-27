@@ -88,6 +88,9 @@ object History {
 }
 
 object Wake {
+    /** Kullanicinin "Jarvis" deyisinin modelde nasil yazildigi (UYANDIRMAYI OGRET ile kaydedilir). */
+    @Volatile var aliases: Set<String> = emptySet()
+
     private val extra = setOf(
         "carvis", "carviz", "jarviz", "carvi", "jarvi", "arvis",
         "harvis", "garvis", "charvis", "cervis", "jarfis", "carfis"
@@ -97,6 +100,9 @@ object Wake {
     fun matches(text: String): Boolean {
         val n = Commands.norm(text)
         val joined = n.replace(" ", "")
+        for (a in aliases) {
+            if (n == a || joined == a.replace(" ", "")) return true
+        }
         if (joined.contains("jarvis") || joined.contains("carvis") || joined.contains("jarviz")) return true
         for (t in n.split(" ")) {
             if (t.length < 4) continue

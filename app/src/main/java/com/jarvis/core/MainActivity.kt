@@ -63,6 +63,8 @@ class MainActivity : Activity() {
         val b = Button(this)
         b.text = t
         b.textSize = 12f
+        b.setTextColor(cyan)
+        b.setBackgroundResource(R.drawable.btn_hud)
         b.setOnClickListener { onClick() }
         return b
     }
@@ -158,6 +160,7 @@ class MainActivity : Activity() {
                 toast("Kaydedildi efendim")
             }
         ))
+        pc.addView(row(btn("UYANDIRMAYI ÖĞRET") { sendAction("teach_wake") }))
         logv = mono(11f)
         logv.setTextColor(0xFF8FB8C4.toInt())
         pc.addView(logv, LinearLayout.LayoutParams(match, wrap))

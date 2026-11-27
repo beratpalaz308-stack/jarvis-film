@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="jarvis_bg">#05080F</color>
+    <color name="jarvis_cyan">#00E5FF</color>
+    <color name="ic_launcher_background">#05080F</color>
+    <style name="JarvisTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/jarvis_bg</item>
+        <item name="android:statusBarColor">@color/jarvis_bg</item>
+        <item name="android:navigationBarColor">@color/jarvis_bg</item>
+        <item name="android:colorAccent">@color/jarvis_cyan</item>
+        <item name="android:textColorPrimary">#FFFFFF</item>
+    </style>
+</resources>

@@ -12,6 +12,9 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.Environment
+import android.os.StatFs
+import android.content.IntentFilter
 import android.os.Build
 import android.provider.AlarmClock
 import android.provider.MediaStore
@@ -112,6 +115,20 @@ object Commands {
             } finally {
                 depth--
             }
+        }
+
+        // Film Jarvis: sohbet cumleleri (internet gerekmez)
+        film(n)?.let { return it }
+
+        // Film Jarvis: durum raporu
+        if (has(n, "durum raporu|sistem durumu|rapor ver|sistemler nasil|sistemleri kontrol")) {
+            return statusReport(ctx)
+        }
+
+        // Film Jarvis: parti protokolu
+        if (has(n, "parti protokol|parti modu")) {
+            Thread { blink(ctx) }.start()
+            return "Parti protokolü devrede efendim. " + playMusic(ctx, "party music", warn)
         }
 
         // Sürüş modu
@@ -318,6 +335,67 @@ object Commands {
     }
 
     private var depth = 0
+
+    private fun film(n: String): String? = when {
+        has(n, "orada misin|burada misin|duyuyor musun") -> "Sizin için her zaman buradayım efendim."
+        has(n, "nasilsin|naber|ne haber") -> "Tüm sistemlerim mükemmel durumda efendim. Sormanız çok nazik."
+        has(n, "kimsin|adin ne|sen kimsin") -> "Ben J.A.R.V.I.S., yani yeterince zeki bir sistem efendim. Telefonunuzdaki yardımcınızım."
+        has(n, "tesekkur|sag ol|eyvallah") -> "Her zaman efendim."
+        has(n, "gunaydin") -> "Günaydın efendim. Umarım iyi uyudunuz."
+        has(n, "iyi geceler") -> "İyi geceler efendim. Sistemleri nöbette tutacağım."
+        has(n, "harikasin|aferin|helal") -> "Teşekkür ederim efendim. Elimden geleni yapıyorum."
+        else -> null
+    }
+
+    private fun blink(ctx: Context) {
+        try {
+            for (i in 0 until 6) {
+                torch(ctx, true)
+                Thread.sleep(250)
+                torch(ctx, false)
+                Thread.sleep(250)
+            }
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun networkName(ctx: Context): String {
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            when {
+                caps == null -> "yok"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobil veri"
+                else -> "var"
+            }
+        } catch (e: Exception) {
+            "bilinmiyor"
+        }
+    }
+
+    private fun statusReport(ctx: Context): String {
+        val bi = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val charging = bi != null && bi.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        val temp = if (bi != null) bi.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10 else 0
+        val freeGb = try {
+            StatFs(Environment.getDataDirectory().path).availableBytes / 1073741824.0
+        } catch (e: Exception) {
+            0.0
+        }
+        val c = Calendar.getInstance()
+        val sb = StringBuilder()
+        sb.append(String.format(Locale.US, "Saat %02d:%02d. ", c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE)))
+        sb.append("Pil yüzde ").append(batteryPct(ctx))
+        if (charging) sb.append(", şarjda")
+        sb.append(". Sıcaklık $temp derece. ")
+        sb.append(String.format(Locale("tr", "TR"), "Boş alan %.1f gigabayt. ", freeGb))
+        sb.append("Bağlantı: ").append(networkName(ctx)).append(". ")
+        val unread = JarvisNotifService.snapshot().size
+        if (unread > 0) sb.append("$unread bekleyen mesaj. ")
+        sb.append("Tüm sistemler çevrimiçi efendim.")
+        return sb.toString()
+    }
 
     private fun setAlarm(ctx: Context, t: Pair<Int, Int>, warn: String): String {
         val i = Intent(AlarmClock.ACTION_SET_ALARM)
